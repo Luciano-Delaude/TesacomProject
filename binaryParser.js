@@ -1,99 +1,136 @@
+/**
+ * Class representing a Binary Parser for decoding and encoding binary data based on a specified format.
+ */
 class BinaryParser {
   /**
-   * Decodifica una trama binaria según el formato especificado.
+   * Decodes a binary frame according to the specified format.
    *
-   * @param {Buffer} buffer - Trama a deserializar
-   * @param {Array} format - Formato de serialización
-   * @returns {Object} Objeto deserializado con campos tag = valor
+   * @param {Buffer} buffer - Binary frame to deserialize
+   * @param {Array} format - Serialization format
+   * @returns {Object} Deserialized object with tag = value fields
+   * @throws {Error} Throws an error if the format specification is invalid or if there are issues with decoding.
    */
    decode(buffer, format) {
-    let first32Bits = 0;
-    // Extract the first 4 bytes (32 bits) from the buffer
-    if (buffer.length > 4) {
-      first32Bits = buffer.readUIntBE(0,4);
-    } else {
-      first32Bits = buffer.readUIntBE(0,buffer.length);
+    if (!Array.isArray(format) || format.length === 0) {
+      throw new Error('Invalid format specification. Format must be a non-empty array.');
     }
-
-    // Extract the next bytes from the buffer
-    const remainingBytes = buffer.slice(buffer.length - 4);
-
+    // Define starting values.
     let offset = 0;
-    let values = first32Bits;
+    let values = 0;
+    let byteOffset = 0;
     let decodedObject = {};
 
     format.forEach(field => {
-        if (field.type == "float") {
-            field.len = 32;
-        }
-        let mask = (1 << field.len) - 1;
-        let fieldValue;
-
-        if (offset < 32) {
-            // If the field is within the first 32 bits, extract the value from the first32Bits
-            fieldValue = values >>> (32 - (offset + field.len)) & mask;
-        } else {
-            // If the field extends beyond the first 32 bits, extract the value from the remaining bytes
-            const byteOffset = Math.ceil(offset / 8) - 4;
-            console.log(offset);
-            const bitOffset = offset % 8;
-            if (field.type == 'float') {
-              fieldValue = remainingBytes.readUIntBE(byteOffset, Math.ceil(field.len / 8));
-            } else {
-              fieldValue = remainingBytes.readUIntBE(byteOffset, Math.ceil(field.len / 8)) >>> bitOffset & mask;
-            }
-            console.log(fieldValue);
-        }
-        offset += field.len;
-
+      //Mask to get the valid data in function of the type and the lenght.
+      let mask = (1 << field.len) - 1;
+      //Value where the processed data will be stored.
+      let fieldValue;
         switch (field.type) {
-            case 'int':
-                // If the value is negative, convert it to a signed integer
-                if ((fieldValue & (1 << (field.len - 1))) !== 0) {
-                    fieldValue = fieldValue - (1 << field.len);
-                }
-                decodedObject[field.tag] = fieldValue;
-                break;
-            case 'uint':
-                decodedObject[field.tag] = fieldValue;
-                break;
-            case 'float':
-                // Create a buffer with the extracted bits and convert it to a float
-                const floatBuffer = Buffer.alloc(4);
-                floatBuffer.writeUint32BE(fieldValue, 0, 4);
-                decodedObject[field.tag] = floatBuffer.readFloatBE(0);
-                break;
-            default:
-                break;
+          case 'uint':
+            //If offset is a multiple of 32, read 32 bits and store them in values.
+            if (offset % 32 == 0) {
+              if (byteOffset + 4 > buffer.length) {
+                values = buffer.readUIntBE(byteOffset,buffer.length - byteOffset);
+              } else {
+                values = buffer.readUIntBE(byteOffset,4);
+                byteOffset = byteOffset + 4;
+              }
+            }
+            /*
+            This line extracts the bits corresponding to the current field from the values variable 
+            by right shifting to align the bits of interest and then applies a bitmask to filter
+             out unwanted bits.
+            */
+            fieldValue = values >>> ((buffer.length * 8) - (offset + field.len)) & mask;
+            
+            decodedObject[field.tag] = fieldValue;
+            offset += field.len;
+            break;
+          case 'int':
+            if (offset % 32 == 0) {
+              if (byteOffset + 4 > buffer.length) {
+                values = buffer.readIntBE(byteOffset,buffer.length - byteOffset);
+              } else {
+                values = buffer.readIntBE(byteOffset,4);
+                byteOffset = byteOffset + 4;
+              }
+            }
+            /*
+            This line extracts the bits corresponding to the current field from the values variable 
+            by right shifting to align the bits of interest and then applies a bitmask to filter
+             out unwanted bits.
+            */
+            fieldValue = values >>> ((buffer.length * 8) - (offset + field.len)) & mask;
+
+            /* This if() checks the most significant bit (MSB) of the fieldValue
+            to determine if the value is negative or positive. If negative, obtains
+            the two's complement of the value.*/
+            if ((fieldValue & (1 << (field.len - 1))) !== 0) {
+              fieldValue = fieldValue - (1 << field.len);
+            }
+            decodedObject[field.tag] = fieldValue;
+            offset += field.len;
+            break;
+          case  'float':
+            if (offset % 32 == 0) {
+              decodedObject[field.tag] = buffer.readFloatBE(byteOffset,4);
+              byteOffset = byteOffset + 4;
+            }
+            offset += 32;
+            break;
+          default:
+            throw new Error(`Invalid field type: ${field.type}`);
         }
     });
-
     return decodedObject;
 }
 
 
-  /**
-   * Codifica un objeto según el formato especificado.
+   /**
+   * Encodes an object according to the specified format.
    *
-   * @param {Object} _object - Objeto a serializar
-   * @param {Array} format - Formato de serialización
-   * @returns {Buffer} Trama binaria codificada
+   * @param {Object} _object - Object to serialize
+   * @param {Array} format - Serialization format
+   * @returns {Buffer} Encoded binary frame
+   * @throws {Error} Throws an error if the value is out of valid range for the specified field or if there are issues with encoding.
    */
   encode(_object, format) {
+    // Define starting values.
     let partialData = 0;
     let partialBits = 0;
     const buffers = [];
 
     format.forEach(field => {
-        const value = _object[field.tag];
+        let value = _object[field.tag];
         const buffer = Buffer.alloc(4);
+        if (field.type == 'float') {
+          field.len = 32;
+        }
+        // Validate field value based on field type and length
+        const minValidValue = field.type === 'int' ? -(1 << (field.len - 1)) : 0;
+        const maxValidValue = field.type === 'int' ? (1 << (field.len - 1)) - 1 : Math.pow(2, field.len) - 1;
+        if (value < minValidValue || value > maxValidValue) {
+          throw new Error(`Invalid value "${value}" for field "${field.tag}". Valid range: [${minValidValue}, ${maxValidValue}].`);
+        }
+
 
         switch (field.type) {
           case 'int':
+          case 'uint':
+            // Convert negative integers to two's complement representation
+            if (value < 0) {
+              value = (1 << field.len) - Math.abs(value);
+            }
+
+            //Concatenate data to reach a 32 bits size of data to not loose information.
             partialData = (partialData << field.len) | value;
             partialBits += field.len; 
             while (partialBits >= 32) {
-              buffer.writeIntBE(partialData >>> (partialBits - 32), 0, 4);
+              if (field.type == 'int') {
+                buffer.writeIntBE((partialData >>> (partialBits - 32)) & (0xFFFFFFFF), 0,4);
+              } else {
+                buffer.writeUInt32BE(partialData >>> (partialBits - 32), 0);
+              }
               // If we have accumulated 32 or more bits, write it to a new buffer
               buffers.push(buffer);
               // Remove the written bits from partialData
@@ -101,26 +138,14 @@ class BinaryParser {
               partialBits -= 32;
             }
 
-            break;
-          case 'uint':
-            partialData = (partialData << field.len) | value;
-            partialBits += field.len; 
-            while (partialBits >= 32) {
-              buffer.writeUInt32BE(partialData >>> (partialBits - 32), 0);
-              // If we have accumulated 32 or more bits, write it to a new buffer
-              buffers.push(buffer);
-              // Remove the written bits from partialData
-              partialData = partialData & ((1 << (partialBits - 32)) - 1);
-              partialBits -= 32;
-            }
             break;
           case 'float':
             buffer.writeFloatBE(value, 0, 4);
             buffers.push(buffer);
             break;
           default:
-            break;
-        }        
+            throw new Error(`Invalid field type: ${field.type}`);
+          }        
     });
     // Write any remaining data (less than 32 bits) to the buffer
     if (partialBits > 0) {
@@ -132,46 +157,6 @@ class BinaryParser {
     const resultBuffer = Buffer.concat(buffers);
     return resultBuffer;
   }
-}
+};
 
-
-const format1 = [
-  { tag: "PTemp", type: "int", len: 12 },
-  { tag: "BattVolt.value", type: "int", len: 12 },
-  { tag: "WaterLevel", type: "int", len: 8 },
-  {tag: "Pressure", type: "float"}
-];
-
-const data = { PTemp: 268, "BattVolt.value":-4, WaterLevel: 115, Pressure: 52.4 };
-
-// const format1 = [{ tag: "var0.value", type: "uint", len: 2 },
-// { tag: "var1.value", type: "uint", len: 2 },
-// { tag: "var2.value", type: "uint", len: 7 },
-// { tag: "var3.value", type: "uint", len: 11 },
-// { tag: "var4.value", type: "uint", len: 10 },
-// { tag: "var5.value", type: "uint", len: 8 },
-// { tag: "var6.value", type: "uint", len: 8 },
-// { tag: "var7.value", type: "uint", len: 8 }];
-
-// const data = {"var0.value" : 1, "var1.value" : 3, "var2.value" : 27, "var3.value": 45,"var4.value": 125487,"var5.value" : 61,
-// "var6.value" : 44,"var7.value" : 37};
-
-const bp = new BinaryParser();
-const dataEncoded = bp.encode(data, format1);
-console.log(dataEncoded.toString('hex')); // Imprime 10c0e073 en hexadecimal
-console.log(dataEncoded.length * 8); // Imprime 32 en bits
-const dataDecoded = bp.decode(dataEncoded, format1);
-console.log(dataDecoded);
-
-
-// const tramaDatos = Buffer.from('010203', 'hex'); // Trama de datos en formato hexadecimal
-// const formato = [
-//   { tag: "v0", type: "int", len: 8 },
-//   { tag: "v1", type: "int", len: 8 },
-//   { tag: "v2", type: "int", len: 8 }
-// ];
-
-// const bp = new BinaryParser();
-// const datosDeserializados = bp.decode(tramaDatos, formato);
-// console.log(datosDeserializados); // Imprime { v0: 1, v1: 2, v2: 3 }
-
+module.exports = BinaryParser;
